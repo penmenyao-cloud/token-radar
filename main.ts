@@ -91,6 +91,14 @@ function checkDashboardOffline(dir: string, files: string[]): void {
   }
 }
 checkDashboardOffline(join(out, 'dashboard'), dashboardFiles);
+
+// The judge reads the dashboard's source only while it fits in the dossier's text cap, so say
+// how much of that budget the page uses; past it, the judge reads a partial source.
+const dashboardBytes = dashboardFiles.reduce((sum, name) => sum + statSync(join(out, 'dashboard', name)).size, 0);
+if (dashboardBytes > TEXT_MAX_BYTES) {
+  process.stderr.write(`token radar: warning: dashboard source is ${dashboardBytes} bytes, past the ${TEXT_MAX_BYTES} byte text cap\n`);
+}
+
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3) fail(`screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view`);
 for (const name of shots) {
@@ -102,5 +110,6 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: dashboard source ${dashboardBytes} bytes of the ${TEXT_MAX_BYTES} byte text cap\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
