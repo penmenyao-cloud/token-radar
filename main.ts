@@ -5,7 +5,10 @@
 //
 // The snapshot comes from --input <snapshot.json|directory>, else /input/snapshot.json. The
 // outputs go to --output <dir>, else $MAKEFUN_OUTPUT_DIR, else /output. Everything is
-// deterministic: the same snapshot bytes always write the same output bytes.
+// deterministic: the same snapshot bytes always write the same output bytes. The model's
+// anchor is calibrated from the snapshot itself at runtime (the median market-cap-to-TVL
+// ratio of the live-token protocols, per category where the sample is large enough), so the
+// same program on a different snapshot prices its rows off that snapshot's own market.
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -43,8 +46,10 @@ const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
 const { board, radar } = buildRadar(snapshot);
+const calibration = radar.calibration;
 const issue = boardIssue(board, snapshot);
 if (issue !== null) fail(`the model wrote a board the gate refuses: ${issue}`);
+const fallbackRows = board.filter((r) => r.model.calibration_fallback).length;
 
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
@@ -110,6 +115,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+    `token radar: calibration from ${calibration.global_sample} live-token protocols: global median ${calibration.global_median.toFixed(4)}x TVL (Q1 ${calibration.q1.toFixed(4)}, Q3 ${calibration.q3.toFixed(4)}), ${calibration.categories.length} categories with their own median, ${fallbackRows} rows on the global fallback\n` +
     `token radar: dashboard source ${dashboardBytes} bytes of the ${TEXT_MAX_BYTES} byte text cap\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashboardFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
