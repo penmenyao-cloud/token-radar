@@ -121,6 +121,9 @@ tbody tr[data-selected="true"] { background: #1b2a3a; box-shadow: inset 3px 0 0 
 .model li b { color: var(--ink); font-weight: 600; }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.8; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: var(--s3) var(--s4); overflow-wrap: anywhere; }
 .formula b { color: var(--accent); font-weight: 600; }
+.model h3 { margin-top: var(--s2); }
+.cal td:first-child { font-weight: 600; }
+.cal .total-row td { border-top: 1px solid var(--line); font-weight: 600; color: var(--ink); }
 .foot { margin-top: var(--s5); padding-top: var(--s4); border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; display: grid; gap: var(--s1); }
 
 /* Detail drawer */
