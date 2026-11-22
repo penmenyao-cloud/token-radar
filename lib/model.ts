@@ -9,25 +9,35 @@
 // caution, but the watchlist is a floor, never a ceiling, and a staking protocol with no token
 // on record is a genuine launch candidate. Protocols whose token already trades never enter
 // the ranking: the dashboard shows them apart, with the market cap the market already gave them.
+// Those live-token protocols do a second job here: they calibrate the model (see below).
 //
-// Implied value is one function of the snapshot's own figures, the same for every protocol:
+// Implied value is one function of the snapshot's own figures, the same for every protocol.
+// Its anchor is the market itself, computed from the snapshot at runtime, never a constant
+// written by hand:
 //
-//   base         = TVL_SCALE x tvl_usd ^ TVL_POWER
+//   anchor       = the median mcap/TVL ratio of the snapshot's live-token protocols in the
+//                  row's own category, where that category has at least MIN_SAMPLE of them;
+//                  otherwise the median over all live-token protocols, and the row says so.
+//   base         = tvl_usd x anchor
 //   growthMult   = 1 + clamp(change_7d, -50, 150) / 100 x GROWTH_WEIGHT
 //   maturityMult = MATURITY_FLOOR + (1 - MATURITY_FLOOR) x min(age_days, MATURITY_DAYS) / MATURITY_DAYS
-//   chainMult    = 1 + CHAIN_STEP x min(max(chains - 1, 0), CHAIN_CAP)
-//   categoryMult = 1 + CATEGORY_WEIGHT x min(tvl_usd / category_tvl, CATEGORY_SHARE_CAP)
-//   implied      = max(1, round(base x growthMult x maturityMult x chainMult x categoryMult))
+//   implied      = max(1, round(base x growthMult x maturityMult))
 //
-// TVL enters with a power below 1, so each extra dollar of locked value is worth a little less
-// than the last: a protocol ten times larger is worth about eight times as much, not ten.
+// A live-token protocol is one whose token already trades: a market cap above zero and locked
+// value above zero, so the ratio is a number the market actually set. The median is used
+// because the ratios spread wide (the first quartile sits near 0.04, the third near 1.04): a
+// mean would let one outlier protocol set the anchor for every row. A category with too few
+// live-token protocols to trust its own median falls back to the global median, so no row is
+// priced off one or two examples. No protocol name is ever special-cased, and no number in
+// the anchor is hand-written: run the same program on a different snapshot and the anchor
+// moves with that snapshot's own market.
+//
 // Seven-day growth is clamped so one explosive week cannot carry a row. Age is the time since
 // DefiLlama first listed the protocol, the record of how long it has run with no token; an
-// unlisted age is treated as one year. Each extra chain is another surface the protocol runs
-// on, worth a little more, capped at five. Standing inside its own category is the protocol's
-// share of its category's TVL across the whole snapshot, capped, so a protocol that dominates
-// its niche is worth more than the same TVL spread thin in a crowded category; a protocol with
-// no category recorded gets no standing bonus. No protocol name is ever special-cased.
+// unlisted age is treated as one year. Chain breadth is not a separate factor any more: the
+// market ratios the anchor is built from already price how far a protocol reaches, because
+// live multi-chain protocols carry their reach in their own ratios, so a second chain factor
+// would pay for the same reach twice.
 
 /** One protocol entry: exactly the ten fields the sealed snapshot carries. */
 export interface SnapshotProtocol {
@@ -54,40 +64,58 @@ export interface Snapshot {
 
 /** The model's constants, stated in the dashboard so the page can recompute every row. */
 export interface ModelConstants {
-  tvl_power: number;
-  tvl_scale: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
   maturity_floor: number;
   maturity_days: number;
   unknown_age_days: number;
-  chain_step: number;
-  chain_cap: number;
-  category_weight: number;
-  category_share_cap: number;
+  /** A category needs this many live-token protocols before its own median is trusted. */
+  min_calibration_sample: number;
 }
 
 export const MODEL: ModelConstants = {
-  tvl_power: 0.9,
-  tvl_scale: 1.6,
   growth_weight: 0.6,
   growth_floor: -50,
   growth_cap: 150,
   maturity_floor: 0.55,
   maturity_days: 1460,
   unknown_age_days: 365,
-  chain_step: 0.04,
-  chain_cap: 5,
-  category_weight: 0.2,
-  category_share_cap: 0.5,
+  min_calibration_sample: 5,
 };
 
 /** The model's version label, shown in the dashboard header. */
-export const MODEL_VERSION = 'five-factor-1';
+export const MODEL_VERSION = 'calibrated-1';
 
 /** How many live-token protocols the dashboard's separate live view carries. */
 export const LIVE_ROWS = 24;
+
+/** One category's market anchor: its live-token median, or the global one on fallback. */
+export interface CalibrationEntry {
+  /** The median mcap/TVL ratio this row is priced with. */
+  median: number;
+  /** How many live-token protocols the median is taken over. */
+  sample: number;
+  /** True when the category had too few live-token protocols and the global median applies. */
+  fallback: boolean;
+  /** The category whose median applies, or null when the global median applies. */
+  category: string | null;
+}
+
+/** The whole calibration, computed from the snapshot at runtime. */
+export interface Calibration {
+  /** The median mcap/TVL ratio over every live-token protocol in the snapshot. */
+  global_median: number;
+  /** How many live-token protocols the global median is taken over. */
+  global_sample: number;
+  /** The first and third quartiles of the live-token ratios, for the dashboard to show. */
+  q1: number;
+  q3: number;
+  /** The smallest sample a category needs before its own median is trusted. */
+  min_sample: number;
+  /** Every category with a trusted median of its own, largest sample first. */
+  categories: { category: string; median: number; sample: number }[];
+}
 
 /** One protocol's standing inside its own category, from the whole snapshot. */
 export interface CategoryStanding {
@@ -115,19 +143,19 @@ export interface BoardRow {
   token_status: 'pre-token';
   on_watchlist: boolean;
   age_days: number | null;
+  /** The protocol's rank by TVL inside its own category, for the dashboard's signals line. */
+  category_rank: number | null;
+  /** How many snapshot protocols name the protocol's category. */
+  category_size: number | null;
   implied_value_usd: number;
   model: {
-    tvl_power: number;
-    tvl_scale: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
-    chain_multiplier: number;
-    category_multiplier: number;
-    category_share: number;
-    category_total_usd: number | null;
-    category_rank: number | null;
-    category_size: number | null;
+    calibration_median: number;
+    calibration_sample: number;
+    calibration_fallback: boolean;
+    calibration_category: string | null;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -147,10 +175,11 @@ export interface RadarRow {
   implied_value_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
-  chain_multiplier: number;
-  category_multiplier: number;
-  /** The category's total TVL, unrounded: the page divides by it, so the recompute is exact. */
-  category_total_usd: number | null;
+  /** The market anchor, unrounded: the page multiplies by it, so the recompute is exact. */
+  calibration_median: number;
+  calibration_sample: number;
+  calibration_fallback: boolean;
+  calibration_category: string | null;
   category_rank: number | null;
   category_size: number | null;
   on_watchlist: boolean;
@@ -174,6 +203,7 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  calibration: Calibration;
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -203,21 +233,80 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
+/** The middle value of sorted numbers; the mean of the two middle values when there are two. */
+export function medianOf(sorted: number[]): number {
+  const n = sorted.length;
+  if (n === 0) throw new SnapshotError('no live-token protocol to calibrate from');
+  return n % 2 === 1 ? sorted[(n - 1) / 2]! : (sorted[n / 2 - 1]! + sorted[n / 2]!) / 2;
+}
+
+/** The value at the q-th fraction of sorted numbers, by nearest lower index. */
+export function quartileOf(sorted: number[], q: number): number {
+  return sorted[Math.floor(q * (sorted.length - 1))]!;
+}
+
+/** A protocol whose token already trades, with a market cap and locked value to divide by. */
+export function isLiveToken(p: SnapshotProtocol): boolean {
+  return (
+    typeof p.mcap_usd === 'number' &&
+    Number.isFinite(p.mcap_usd) &&
+    p.mcap_usd > 0 &&
+    typeof p.tvl_usd === 'number' &&
+    Number.isFinite(p.tvl_usd) &&
+    p.tvl_usd > 0
+  );
+}
+
+/** The market anchor, computed from the snapshot's own live-token protocols. */
+export function calibrate(snapshot: Snapshot, model: ModelConstants = MODEL): Calibration {
+  const live = snapshot.protocols.filter(isLiveToken);
+  if (live.length === 0) throw new SnapshotError('the snapshot holds no live-token protocol to calibrate from');
+  const ratios = live.map((p) => p.mcap_usd! / p.tvl_usd).sort((a, b) => a - b);
+  const byCategory = new Map<string, number[]>();
+  for (const p of live) {
+    if (p.category === null) continue;
+    const list = byCategory.get(p.category) ?? [];
+    list.push(p.mcap_usd! / p.tvl_usd);
+    byCategory.set(p.category, list);
+  }
+  const categories: { category: string; median: number; sample: number }[] = [];
+  for (const [category, values] of byCategory) {
+    if (values.length < model.min_calibration_sample) continue;
+    categories.push({ category, median: medianOf([...values].sort((a, b) => a - b)), sample: values.length });
+  }
+  categories.sort((a, b) => b.sample - a.sample || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  return {
+    global_median: medianOf(ratios),
+    global_sample: live.length,
+    q1: quartileOf(ratios, 0.25),
+    q3: quartileOf(ratios, 0.75),
+    min_sample: model.min_calibration_sample,
+    categories,
+  };
+}
+
+/** The anchor one protocol is priced with: its category's median, or the global one. */
+export function calibrationFor(category: string | null, calibration: Calibration): CalibrationEntry {
+  if (category !== null) {
+    const own = calibration.categories.find((c) => c.category === category);
+    if (own !== undefined) return { median: own.median, sample: own.sample, fallback: false, category };
+  }
+  return { median: calibration.global_median, sample: calibration.global_sample, fallback: true, category: null };
+}
+
 /** The multipliers and the implied value one protocol gets. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
-  standing: CategoryStanding | null,
+  calibration: Calibration,
 ): {
   implied: number;
   base: number;
   growthPct: number;
   growthMult: number;
   maturityMult: number;
-  chainMult: number;
-  categoryMult: number;
-  categoryShare: number;
+  anchor: CalibrationEntry;
   age: number | null;
 } {
   const age = ageDays(asOf, protocol.listed_at);
@@ -227,12 +316,10 @@ export function impliedValue(
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult =
     model.maturity_floor + (1 - model.maturity_floor) * (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days);
-  const chainMult = 1 + model.chain_step * Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_cap);
-  const categoryShare = standing !== null && standing.total_tvl_usd > 0 ? protocol.tvl_usd / standing.total_tvl_usd : 0;
-  const categoryMult = 1 + model.category_weight * Math.min(categoryShare, model.category_share_cap);
-  const base = model.tvl_scale * Math.pow(Math.max(protocol.tvl_usd, 0), model.tvl_power);
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult * categoryMult));
-  return { implied, base, growthPct, growthMult, maturityMult, chainMult, categoryMult, categoryShare, age };
+  const anchor = calibrationFor(protocol.category, calibration);
+  const base = Math.max(protocol.tvl_usd, 0) * anchor.median;
+  const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
+  return { implied, base, growthPct, growthMult, maturityMult, anchor, age };
 }
 
 /** Every protocol's standing inside its own category, keyed by slug. */
@@ -284,10 +371,11 @@ export function isRankable(p: SnapshotProtocol): boolean {
 /** The protocols the board ranks: every rankable pre-token protocol, strongest first, ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const standings = categoryStandings(snapshot);
+  const calibration = calibrate(snapshot, model);
   const watch = new Set(snapshot.watchlist);
   const chosen = snapshot.protocols.filter((p) => isRankable(p) || watch.has(p.slug));
   const scored = chosen.map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model, standings.get(p.slug) ?? null);
+    const v = impliedValue(p, snapshot.as_of, model, calibration);
     return { p, standing: standings.get(p.slug) ?? null, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -306,30 +394,30 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: 'pre-token',
     on_watchlist: watch.has(s.p.slug),
     age_days: s.age,
+    category_rank: s.standing === null ? null : s.standing.rank,
+    category_size: s.standing === null ? null : s.standing.size,
     implied_value_usd: s.implied,
     model: {
-      tvl_power: model.tvl_power,
-      tvl_scale: model.tvl_scale,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
-      chain_multiplier: round4(s.chainMult),
-      category_multiplier: round4(s.categoryMult),
-      category_share: round4(s.categoryShare),
-      category_total_usd: s.standing === null ? null : s.standing.total_tvl_usd,
-      category_rank: s.standing === null ? null : s.standing.rank,
-      category_size: s.standing === null ? null : s.standing.size,
+      calibration_median: s.anchor.median,
+      calibration_sample: s.anchor.sample,
+      calibration_fallback: s.anchor.fallback,
+      calibration_category: s.anchor.category,
       age_days: s.age,
     },
-    farm_steps: farmSteps(s.p, s.age),
+    farm_steps: farmSteps(s.p, s.age, s.implied),
   }));
 }
 
 // ---- Farm plans ----
-// Each plan is derived from the protocol's own record: its category picks the action, its TVL
-// band picks the capital, its first chain picks the gas band, its age picks the hold. Every
-// step states what it costs in dollars and how long it takes, and the plan ends with a concrete
-// exit condition: when to claim, and when to unwind even if no claim ever opens. Nothing is
+// Each plan is derived from the protocol's own record: its category picks the action, its
+// calibrated implied value picks the capital, its first chain picks the gas band, its age
+// picks the hold. A row whose calibrated value is far below its TVL farms like a small row,
+// not like a top row: the capital follows the implied value, not the TVL. Every step states
+// what it costs in dollars and how long it takes, and the plan ends with a concrete exit
+// condition: when to claim, and when to unwind even if no claim ever opens. Nothing is
 // hand-written per protocol, no URL is invented, and no plan claims a protocol has no token.
 
 /** The first chain a protocol names, or a neutral phrase. */
@@ -337,11 +425,11 @@ function chainOf(p: SnapshotProtocol): string {
   return p.chains.length > 0 ? p.chains[0]! : 'its main chain';
 }
 
-/** The capital one farm position needs, from the protocol's own TVL band. */
-function capitalFor(p: SnapshotProtocol): number {
-  if (p.tvl_usd >= 1_000_000_000) return 200;
-  if (p.tvl_usd >= 100_000_000) return 120;
-  if (p.tvl_usd >= 25_000_000) return 80;
+/** The capital one farm position needs, from the protocol's calibrated implied value. */
+function capitalFor(impliedValueUsd: number): number {
+  if (impliedValueUsd >= 100_000_000) return 200;
+  if (impliedValueUsd >= 25_000_000) return 120;
+  if (impliedValueUsd >= 5_000_000) return 80;
   return 50;
 }
 
@@ -460,9 +548,9 @@ function stepText(text: string, cost: string, time: string): string {
 }
 
 /** A protocol's seven-step farm plan, derived from its own record. */
-export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
+export function farmSteps(p: SnapshotProtocol, age: number | null, impliedValueUsd: number): string[] {
   const chain = chainOf(p);
-  const capital = capitalFor(p);
+  const capital = capitalFor(impliedValueUsd);
   const hold = holdDaysFor(age);
   const gas = gasNote(chain);
   const exitAfter = hold + 30;
@@ -510,6 +598,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
+  const calibration = calibrate(snapshot, model);
   const early = board.filter((r) => !r.on_watchlist).length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -517,6 +606,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    calibration,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
@@ -535,11 +625,12 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
       implied_value_usd: row.implied_value_usd,
       growth_multiplier: row.model.growth_multiplier,
       maturity_multiplier: row.model.maturity_multiplier,
-      chain_multiplier: row.model.chain_multiplier,
-      category_multiplier: row.model.category_multiplier,
-      category_total_usd: row.model.category_total_usd,
-      category_rank: row.model.category_rank,
-      category_size: row.model.category_size,
+      calibration_median: row.model.calibration_median,
+      calibration_sample: row.model.calibration_sample,
+      calibration_fallback: row.model.calibration_fallback,
+      calibration_category: row.model.calibration_category,
+      category_rank: row.category_rank,
+      category_size: row.category_size,
       on_watchlist: row.on_watchlist,
     })),
     live,
