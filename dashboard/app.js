@@ -3,6 +3,9 @@
 // inputs and the protocol's farm plan, and the live-token protocols set apart. No network:
 // every byte it shows is in data.js. The value model and the farm plans are the same
 // derivations main.ts writes to board.json, recomputed here from the snapshot figures.
+// The anchor is the market itself: each row's implied value starts from its TVL times the
+// median market-cap-to-TVL ratio of the live-token protocols in its category (or the global
+// median where the category's sample is too small), computed from the snapshot at runtime.
 (function () {
   'use strict';
 
@@ -31,32 +34,38 @@
   function fmtMult(n) {
     return 'x' + n.toFixed(2);
   }
+  function fmtRatio(n) {
+    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
+    return n.toFixed(4) + 'x';
+  }
 
   // The model in one function: the page recomputes a row from the snapshot figures and checks
   // the number board.json carries, so the page's code and the board's data are visibly the same
-  // arithmetic. TVL enters with a power below 1: each extra dollar of locked value is worth a
-  // little less than the last. Chain breadth and standing inside the protocol's own category
-  // are the two further factors, both from the snapshot's figures alone.
+  // arithmetic. The anchor is a market median, not a hand-written scale: TVL times the median
+  // market-cap-to-TVL ratio of the live-token protocols in the row's category, then two
+  // adjustments the row's own record supplies — seven-day growth and age with no token.
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
     var growthMult = 1 + (growth / 100) * model.growth_weight;
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (1 - model.maturity_floor) * (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days);
-    var chains = row.chains ? row.chains.length : 0;
-    var chainMult = 1 + model.chain_step * Math.min(Math.max(chains - 1, 0), model.chain_cap);
-    var share = row.category_total_usd ? row.tvl_usd / row.category_total_usd : 0;
-    var categoryMult = 1 + model.category_weight * Math.min(share, model.category_share_cap);
-    var base = model.tvl_scale * Math.pow(Math.max(row.tvl_usd, 0), model.tvl_power);
+    var base = Math.max(row.tvl_usd, 0) * row.calibration_median;
     return {
-      implied: Math.max(1, Math.round(base * growthMult * maturity * chainMult * categoryMult)),
+      implied: Math.max(1, Math.round(base * growthMult * maturity)),
       base: base,
       growth: growth,
       growthMult: growthMult,
-      maturity: maturity,
-      chainMult: chainMult,
-      categoryMult: categoryMult,
-      share: share
+      maturity: maturity
     };
+  }
+
+  // What anchors one row, in the words the detail view shows: its category's live-token
+  // median with the sample behind it, or the global median when the category fell back.
+  function anchorLine(row) {
+    if (row.calibration_fallback) {
+      return 'Global median of ' + row.calibration_sample + ' live-token protocols (' + fmtRatio(row.calibration_median) + 'x TVL): ' + (row.category || 'no category recorded') + ' has too few live-token protocols of its own, so the row is priced off the whole market instead.';
+    }
+    return (row.calibration_category || row.category) + ' median of ' + row.calibration_sample + ' live-token protocols (' + fmtRatio(row.calibration_median) + 'x TVL).';
   }
 
   function el(tag, attrs) {
@@ -80,13 +89,16 @@
   }
 
   // ---- Farm plans: the same derivation main.ts writes to board.json. ----
-  // Category picks the action, the TVL band picks the capital, the first chain picks the gas
-  // band, age picks the hold. No name is special-cased and no URL is invented.
+  // Category picks the action, the calibrated implied value picks the capital, the first
+  // chain picks the gas band, age picks the hold. A row whose calibrated value is far below
+  // its TVL farms like a small row, not like a top row. No name is special-cased and no
+  // URL is invented.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
   function capitalFor(p) {
-    if (p.tvl_usd >= 1e9) return 200;
-    if (p.tvl_usd >= 1e8) return 120;
-    if (p.tvl_usd >= 25e6) return 80;
+    var v = p.implied_value_usd;
+    if (v >= 1e8) return 200;
+    if (v >= 25e6) return 120;
+    if (v >= 5e6) return 80;
     return 50;
   }
   var CHEAP_CHAINS = ['arbitrum', 'optimism', 'base', 'blast', 'zksync', 'polygon', 'linea', 'scroll', 'mantle', 'mode', 'fraxtal', 'ink', 'unichain', 'worldchain', 'abstract', 'soneium', 'bnb', 'bsc', 'avalanche', 'gnosis'];
@@ -236,6 +248,7 @@
     if (r.category_rank !== null && r.category_rank !== undefined && r.category_size) {
       parts.push('#' + r.category_rank + ' of ' + r.category_size + ' in ' + (r.category || 'Other'));
     }
+    parts.push(r.calibration_fallback ? 'global anchor ' + fmtRatio(r.calibration_median) : 'anchor ' + fmtRatio(r.calibration_median));
     parts.push(r.chains && r.chains.length ? r.chains.slice(0, 3).join(', ') : 'an unnamed chain');
     return parts.join(' \u00b7 ');
   }
@@ -255,6 +268,7 @@
   }
 
   function hero() {
+    var cal = DATA.calibration;
     return el('section', { class: 'hero' },
       el('div', null,
         el('h1', { text: 'What would each pre-token protocol be worth if it launched today?' }),
@@ -262,12 +276,15 @@
           'Every protocol on this board ',
           el('b', { text: 'records no token' }),
           ' in the snapshot, and none is an exchange, a bridge, a versioned pool or a named wrapped or staked product. The watchlist — at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record — is the floor, and the early radar adds ' + DATA.early_size + ' smaller pre-token protocols below it. Implied value is this entry\u2019s model, not a price and not a prediction that a token is coming.'
+        ),
+        el('p', null,
+          'The anchor is the market itself: each row is priced off the median market-cap-to-TVL ratio of the live-token protocols in its own category — ' + fmtRatio(cal.global_median) + 'x of TVL across all ' + cal.global_sample + ' of them — and categories with fewer than ' + cal.min_sample + ' live-token protocols fall back to that global median. No hand-written scale anywhere.'
         )
       ),
       el('div', { class: 'stats' },
         el('div', { class: 'stat' }, el('span', { text: 'Watchlist covered' }), el('b', null, el('em', { text: String(DATA.watchlist_size) }), ' / ' + DATA.watchlist_size)),
         el('div', { class: 'stat' }, el('span', { text: 'Pre-token rows' }), el('b', { text: String(DATA.board_size) })),
-        el('div', { class: 'stat' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
+        el('div', { class: 'stat' }, el('span', { text: 'Market anchor' }), el('b', { text: fmtRatio(cal.global_median) + ' of TVL' })),
         el('div', { class: 'stat' }, el('span', { text: 'Combined implied value' }), el('b', { text: fmtUsd(DATA.total_implied_usd) }))
       )
     );
@@ -376,7 +393,7 @@
       ));
     });
     return el('div', { class: 'panel' },
-      el('div', { class: 'caption', text: 'These protocols already have a token that trades, so their market cap is a market fact, not a model. They are set apart from the pre-token ranking and never ranked by implied value.' }),
+      el('div', { class: 'caption', text: 'These protocols already have a token that trades, so their market cap is a market fact, not a model. They are set apart from the pre-token ranking and never ranked by implied value. Their median market-cap-to-TVL ratio is what calibrates every row on the board.' }),
       el('div', { class: 'table-wrap' },
         el('table', null,
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Token' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }))),
@@ -388,24 +405,41 @@
 
   function modelPanel() {
     var m = DATA.model;
+    var cal = DATA.calibration;
+    var calRows = cal.categories.map(function (c) {
+      return el('tr', null,
+        el('td', { text: c.category }),
+        el('td', { class: 'num', text: fmtRatio(c.median) }),
+        el('td', { class: 'num', text: String(c.sample) })
+      );
+    });
+    calRows.push(el('tr', { class: 'total-row' },
+      el('td', { text: 'All live-token protocols' }),
+      el('td', { class: 'num', text: fmtRatio(cal.global_median) }),
+      el('td', { class: 'num', text: String(cal.global_sample) })
+    ));
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { text: 'One function scores every row, from the snapshot figures alone. No protocol name is special-cased and no row is hand-picked.' }),
+      el('p', { text: 'One function scores every row, from the snapshot figures alone. No protocol name is special-cased and no row is hand-picked, and no number in the anchor is hand-written: the program computes it from the snapshot at runtime.' }),
       el('div', { class: 'formula' },
-        'implied = round( ', el('b', { text: String(m.tvl_scale) }), ' \u00d7 tvl_usd ^ ', el('b', { text: String(m.tvl_power) }),
-        ' \u00d7 (1 + clamp(change_7d, ', el('b', { text: String(m.growth_floor) }), ', ', el('b', { text: String(m.growth_cap) }), ') / 100 \u00d7 ', el('b', { text: String(m.growth_weight) }),
-        ') \u00d7 (', el('b', { text: String(m.maturity_floor) }), ' + ', el('b', { text: (1 - m.maturity_floor).toFixed(2) }), ' \u00d7 min(age_days, ', el('b', { text: String(m.maturity_days) }), ') / ', el('b', { text: String(m.maturity_days) }),
-        ') \u00d7 (1 + ', el('b', { text: String(m.chain_step) }), ' \u00d7 min(chains \u2212 1, ', el('b', { text: String(m.chain_cap) }),
-        ')) \u00d7 (1 + ', el('b', { text: String(m.category_weight) }), ' \u00d7 min(category share, ', el('b', { text: String(m.category_share_cap) }), ')) )'
+        'implied = round( tvl_usd \u00d7 anchor ',
+        '\u00d7 (1 + clamp(change_7d, ', el('b', { text: String(m.growth_floor) }), ', ', el('b', { text: String(m.growth_cap) }), ') / 100 \u00d7 ', el('b', { text: String(m.growth_weight) }),
+        ') \u00d7 (', el('b', { text: String(m.maturity_floor) }), ' + ', el('b', { text: (1 - m.maturity_floor).toFixed(2) }), ' \u00d7 min(age_days, ', el('b', { text: String(m.maturity_days) }), ') / ', el('b', { text: String(m.maturity_days) }), ') )'
       ),
       el('ul', null,
-        el('li', null, el('b', { text: 'Size. ' }), 'The power below 1 on TVL means a protocol ten times larger is worth about eight times as much, not ten: each extra dollar of locked value counts for a little less.'),
+        el('li', null, el('b', { text: 'Anchor. ' }), 'The median market-cap-to-TVL ratio of the live-token protocols in the row\u2019s own category — the market\u2019s own answer to what locked value is worth once it has a token. The ratios spread wide (first quartile ' + fmtRatio(cal.q1) + ', third quartile ' + fmtRatio(cal.q3) + '), so the median is used, not the mean: one outlier cannot set the anchor for every row.'),
+        el('li', null, el('b', { text: 'Fallback. ' }), 'A category needs at least ' + cal.min_sample + ' live-token protocols before its own median is trusted; with fewer, the row is priced off the global median of all ' + cal.global_sample + ' live-token protocols, and the row says so.'),
         el('li', null, el('b', { text: 'Momentum. ' }), 'Seven-day growth is clamped so one explosive week cannot carry a row, and a steep fall cannot sink one either.'),
-        el('li', null, el('b', { text: 'Maturity. ' }), 'Age is the time since DefiLlama first listed the protocol; an unlisted age is treated as ' + m.unknown_age_days + ' days. A longer record with no token on it earns the full factor.'),
-        el('li', null, el('b', { text: 'Reach. ' }), 'Each chain past the first adds ' + (m.chain_step * 100) + '%, capped at ' + m.chain_cap + ' extra chains: more chains, more surfaces the protocol runs on.'),
-        el('li', null, el('b', { text: 'Standing. ' }), 'The protocol\u2019s share of its own category\u2019s TVL across the whole snapshot, capped at ' + (m.category_share_cap * 100) + '%: dominating a niche is worth more than the same TVL spread thin. A protocol with no category recorded gets no standing bonus.')
+        el('li', null, el('b', { text: 'Maturity. ' }), 'Age is the time since DefiLlama first listed the protocol; an unlisted age is treated as ' + m.unknown_age_days + ' days. A longer record with no token on it earns the full factor. Chain breadth is not a separate factor: the market ratios the anchor is built from already price how far a protocol reaches, so a second chain factor would pay for the same reach twice.')
       ),
-      el('p', { text: 'Select any row to see its own numbers recomputed in the page, factor by factor.' })
+      el('h3', { text: 'Calibration table — median market-cap-to-TVL ratio, by category' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'cal' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Median ratio' }), el('th', { scope: 'col', text: 'Live-token protocols' }))),
+          el('tbody', null, calRows)
+        )
+      ),
+      el('p', { text: 'Select any row to see its own numbers recomputed in the page, anchor included.' })
     );
   }
 
@@ -430,8 +464,8 @@
     var calc = impliedOf(row, DATA.model);
     var matches = calc.implied === row.implied_value_usd;
     var standing = (row.category_rank !== null && row.category_rank !== undefined && row.category_size)
-      ? '#' + row.category_rank + ' of ' + row.category_size + ' \u00b7 ' + (calc.share * 100).toFixed(1) + '% of category TVL'
-      : 'no category recorded, so no standing bonus';
+      ? '#' + row.category_rank + ' of ' + row.category_size + ' in ' + (row.category || 'Other') + ' by TVL'
+      : 'no category recorded';
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'kicker', text: 'RANK ' + row.rank + ' OF ' + DATA.board_size + (row.on_watchlist ? ' \u00b7 WATCHLIST' : ' \u00b7 EARLY RADAR') }),
@@ -446,13 +480,11 @@
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token on record' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
-        el('div', null, el('span', { text: 'Chains' }), el('b', { class: 'num', text: String(row.chains ? row.chains.length : 0) })),
         el('div', null, el('span', { text: 'Category standing' }), el('b', { class: 'num', text: standing })),
-        el('div', { class: 'factor' }, el('span', { text: 'Base: 1.6 \u00d7 TVL ^ 0.9' }), el('b', { class: 'num', text: fmtUsd(calc.base) })),
+        el('div', { class: 'factor' }, el('span', { text: 'Market anchor: ' + anchorLine(row) }), el('b', { class: 'num', text: fmtRatio(row.calibration_median) })),
+        el('div', { class: 'factor' }, el('span', { text: 'Base: TVL \u00d7 anchor' }), el('b', { class: 'num', text: fmtUsd(calc.base) })),
         el('div', { class: 'factor' }, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: fmtMult(calc.growthMult) })),
         el('div', { class: 'factor' }, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: fmtMult(calc.maturity) })),
-        el('div', { class: 'factor' }, el('span', { text: 'Chain multiplier' }), el('b', { class: 'num', text: fmtMult(calc.chainMult) })),
-        el('div', { class: 'factor' }, el('span', { text: 'Category multiplier' }), el('b', { class: 'num', text: fmtMult(calc.categoryMult) })),
         el('div', { class: 'total' }, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
       (function () {
@@ -475,7 +507,7 @@
         var tail = at >= 0 ? s.slice(at + 1) : '';
         return el('li', null, el('b', { text: action }), el('span', { class: 'cost', text: tail }));
       })),
-      el('p', { class: 'note', text: 'The plan follows from this protocol\u2019s own record — its category, its chains, its size and its age — not from a list of names. Gas bands are per-transaction estimates for the first chain at the time of the snapshot; the exit step names when to claim and when to unwind even if no claim opens.' })
+      el('p', { class: 'note', text: 'The plan follows from this protocol\u2019s own record — its category, its chains, its calibrated implied value and its age — not from a list of names. The capital follows the implied value, so a row the market would price small farms small. Gas bands are per-transaction estimates for the first chain at the time of the snapshot; the exit step names when to claim and when to unwind even if no claim opens.' })
     ));
     if (typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
